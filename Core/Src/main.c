@@ -18,18 +18,13 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stm32f401xe.h"
-#include "stm32f4xx.h"
 #include "stm32f4xx_hal.h"
-#include "stm32f4xx_hal_adc.h"
-#include "stm32f4xx_hal_def.h"
 #include "stm32f4xx_hal_gpio.h"
-#include "stm32f4xx_hal_tim.h"
-#include <stdint.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
+#include <stdint.h>
 
 /* USER CODE END Includes */
 
@@ -46,15 +41,16 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define ADC_CHANNELS 3
+#define ADC_FULL_SCALE 4095
 #define DIGITAL_INPUTS 1
 #define PWM_OUTPUTS 3
-#define PWD_INPUTS 3
 
 #define LEDS 8
 
 // Button thresholds (in ms)
 #define PRESS_SHORT_TIME_MS 300
 #define PRESS_LONG_TIME_MS 500 
+#define PRESS_DOUBLE_TIME_MS 500
 
 /* USER CODE END PM */
 
@@ -64,7 +60,7 @@ DMA_HandleTypeDef hdma_adc1;
 
 TIM_HandleTypeDef htim1;
 
-/* USER CODE BEGIN */
+/* USER CODE BEGIN PV */
 
 // Buffer to store ADC readings from 3 channels 
 uint16_t adc_buffer[ADC_CHANNELS];
@@ -79,19 +75,44 @@ uint8_t display_mode = 0;
 bool running_mode = false;
 
 // Button handling variables
-bool button_pressed = false;
-uint32_t buton_pressed_time = 0; // in seconds
-uint32_t last_button_release = 0; // in seconds
-uint32_t click_count = 0; // for double clicks
+typedef struct {
+  bool is_button_pressed;
+  uint32_t press_time; // in seconds
+  uint32_t last_release; // in seconds
+  uint32_t click_count;
+} ButtonInput;
+
+ButtonInput button_input = {
+  .is_button_pressed = false,
+  .press_time = 0, // in seconds
+  .last_release = 0, // in seconds
+  .click_count = 0, // for double clicks
+};
+
+// Running LED animation state
+typedef struct{
+  bool direction;
+  uint8_t position;
+  uint32_t last_update_time;
+} RunningLED;
+
+RunningLED running_led = {
+  .position = 0,
+  .last_update_time = 0,
+  .direction = true,
+};
+
 
 // Set LED (GPIO) pins 
 GPIO_TypeDef *led_ports[LEDS] = {
   GPIOB, GPIOB, GPIOB, GPIOB,
-  GPIOB, GPIOB, GPIOB, GPIOB};
+  GPIOB, GPIOB, GPIOB, GPIOB
+};
   
 uint16_t led_pins[LEDS] = {
   GPIO_PIN_0, GPIO_PIN_1, GPIO_PIN_2, GPIO_PIN_3,
-  GPIO_PIN_4, GPIO_PIN_5, GPIO_PIN_6, GPIO_PIN_7};
+  GPIO_PIN_4, GPIO_PIN_5, GPIO_PIN_6, GPIO_PIN_7
+};
 
 /* USER CODE END PV */
 
@@ -103,27 +124,30 @@ static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 
 /* USER CODE BEGIN PFP */
-void set_leds(uint8_t pattern);
-void display_scale(uint16_t adc_buffer);
-void update_PWM();
-
-
+void set_LEDs(uint8_t pattern);
+void Display_Scale(uint16_t adc_buffer);
+void Display_Bits(uint16_t adc_value);
+void Indicate_Channels(uint8_t channel);
+void Update_Running_LED(void);
+void Update_PWM_Outputs(void);
+void Handle_Button(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
 // Set LED GPIO pins 
-void set_leds(uint8_t pattern)
+void set_LEDs(uint8_t pattern)
 {
-  for (uint16_t i = 0; i < LEDS; i++) {
+  for (uint16_t i = 0; i < LEDS; i++)
+  {
     HAL_GPIO_WritePin(led_ports[i], led_pins[i],
     (pattern & (1 << i)) ?  GPIO_PIN_SET : GPIO_PIN_RESET);
   }
 }
 
 // The bar graph scale mode for 8 LEDs
-void display_scale(uint16_t adc_value)
+void Display_Scale(uint16_t adc_value)
 {
   // Convert ADC_value (0-4095) to the LED count (0-8)
   // It results which led is lighting - (0-8)
@@ -131,19 +155,133 @@ void display_scale(uint16_t adc_value)
   uint8_t pattern = 0;
 
   // It does bit shifting manipulation (shift it left by i pos)
-  for (uint16_t i = 0; i < led_count; i++) {
+  for (uint16_t i = 0; i < led_count; i++)
+  {
     pattern = pattern | (1 << i);    
+  }
+
+  set_LEDs(pattern);
+}
+
+// Display upper 8 bits of ADC value in binary
+void Display_Bits(uint16_t adc_value)
+{
+  uint8_t upper_bits = (adc_value >> 4) & 0xFF;
+  set_LEDs(upper_bits);
+}
+
+// Blink all LEDs to indicate channel number
+void Indicate_Channel(uint8_t channel)
+{
+  // Blink (channel + 1) times 
+  for (uint8_t i = 0; i < (channel + 1); i++)
+  {
+    set_LEDs(0xFF); // All LEDs ON
+    HAL_Delay(200);
+    set_LEDs(0x00); // All LEDs OFF
+    HAL_Delay(200);
   }
 }
 
+// Update running LED animation
+void Update_Running_LED(void)
+{
+  uint16_t adc_value = adc_buffer[current_channel];
 
-void update_PWN()
+  // Calculate delay based on Button thresholds and ADC value
+  uint32_t delay = PRESS_LONG_TIME_MS - ((adc_value * (PRESS_LONG_TIME_MS - PRESS_SHORT_TIME_MS)) / ADC_FULL_SCALE);
+  uint32_t current_time = HAL_GetTick();
+
+  if (current_time - running_led.last_update_time >= delay)
+  {
+    running_led.last_update_time = current_time;
+
+    // Light only the current LED
+    set_LEDs(1 << running_led.position);
+    
+    if (running_led.direction)
+    {
+      running_led.position++;
+      if (running_led.position >= (LEDS - 1))
+      {
+        running_led.position = LEDS - 1;
+        running_led.direction = false; // Reverse direction
+      }
+    } else {
+      // Moving backward
+      if (running_led.position == 0)
+      {
+        running_led.direction = true;
+      } else {
+        running_led.position--;
+      }
+    }
+  }
+}
+
+void Update_PWM_Outputs(void)
 {
   uint32_t pwm_period = htim1.Init.Period; 
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (adc_buffer[ADC_CHANNEL_0] * pwm_period) / 4096);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (adc_buffer[ADC_CHANNEL_1] * pwm_period) / 4096);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (adc_buffer[ADC_CHANNEL_2] * pwm_period) / 4096);
+
+  // Set PWM duty cycle proportional to ADC value
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (adc_buffer[ADC_CHANNEL_0] * pwm_period) / ADC_FULL_SCALE);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (adc_buffer[ADC_CHANNEL_1] * pwm_period) / ADC_FULL_SCALE);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (adc_buffer[ADC_CHANNEL_2] * pwm_period) / ADC_FULL_SCALE);
 }
+
+void Handle_Button(void)
+{
+  bool button_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_12) == GPIO_PIN_RESET);
+  uint32_t current_time = HAL_GetTick();
+
+  // Button press detection
+  if (button_state && !button_input.is_button_pressed)
+  {
+    // button state is pressed
+    button_input.is_button_pressed = true;
+    button_input.press_time = current_time; 
+  }
+
+  // Button release detection
+  if (!button_state && button_input.is_button_pressed)
+  {
+    button_input.is_button_pressed = false;
+    
+    // Initialize Button Press Duration
+    uint32_t press_duration = current_time - button_input.press_time;
+
+    // Detect SHORT Press
+    if (press_duration < PRESS_SHORT_TIME_MS)
+    {
+      // Check for double click
+      if (current_time - button_input.last_release < PRESS_DOUBLE_TIME_MS)
+      {
+        button_input.click_count++;
+        if (button_input.click_count == 2)
+        {
+          running_mode = false;
+        } else {
+          running_mode = true;
+         
+          running_led.direction = true;
+          running_led.position = 0;
+          running_led.last_update_time = current_time;
+        }
+      }
+      button_input.click_count = 0;
+    }
+ } else {
+  if (running_mode == false)
+  {
+    // Opposite value
+    display_mode = !display_mode;
+  }
+  button_input.click_count = 1;
+ }
+
+  button_input.last_release = current_time;
+}
+
 
 /* USER CODE END 0 */
 
@@ -161,7 +299,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
- HAL_Init();
+  HAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -181,24 +319,57 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
 
+  // Start ADC with DMA
+  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer,ADC_CHANNELS) != HAL_OK)
+  {
+    while (1)
+    {
+      set_LEDs(0xFF); // All LEDs ON
+      HAL_Delay(100);
+      set_LEDs(0x00); // All LEDs OFF 
+      HAL_Delay(200);
+    }
+  }
+
+  // Start PWM on all 3 channels
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+  // Initial indication: show channel 0 selected
+  Indicate_Channel(current_channel);
+  
+  // Small delay before entering main loop
+  HAL_Delay(500);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    // uint32_t current_time = HAL_GetTick(); 
-    
-    HAL_ADC_Start(&hadc1);
-    if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
-      adc_buffer[ADC_CHANNEL_0] = HAL_ADC_GetValue(&hadc1);
-      adc_buffer[ADC_CHANNEL_1] = HAL_ADC_GetValue(&hadc1);
-      adc_buffer[ADC_CHANNEL_2] = HAL_ADC_GetValue(&hadc1);
-    }    
 
-    update_PWM();
+    // Handling button input
+    Handle_Button();
 
+    Update_PWM_Outputs();
 
+    if (running_mode == true)
+    {
+      Update_Running_LED();
+    } else {
+      uint16_t current_adc = adc_buffer[current_channel];
+      
+      if (display_mode == 0)
+      {
+        Display_Scale(current_adc);
+      } else {
+        Display_Bits(current_adc);
+      }
+    }
+
+    // Set small delay for button debouncing to prevent CPU overflow
+    HAL_Delay(10);
 
     /* USER CODE END WHILE */
 
@@ -342,7 +513,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 83;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 65535;
+  htim1.Init.Period = 999;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
