@@ -19,7 +19,9 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f4xx_hal.h"
+#include "stm32f4xx_hal_adc.h"
 #include "stm32f4xx_hal_gpio.h"
+#include "stm32f4xx_hal_tim.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -41,7 +43,7 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define ADC_CHANNELS 3
-#define ADC_FULL_SCALE 4095
+#define ADC_FULL_SCALE 4096
 #define DIGITAL_INPUTS 1
 #define PWM_OUTPUTS 3
 
@@ -151,7 +153,7 @@ void Display_Scale(uint16_t adc_value)
 {
   // Convert ADC_value (0-4095) to the LED count (0-8)
   // It results which led is lighting - (0-8)
-  uint8_t led_count = (adc_value * 9) / 4096;
+  uint8_t led_count = (adc_value * 9) / ADC_FULL_SCALE;
   uint8_t pattern = 0;
 
   // It does bit shifting manipulation (shift it left by i pos)
@@ -224,62 +226,79 @@ void Update_PWM_Outputs(void)
   uint32_t pwm_period = htim1.Init.Period; 
 
   // Set PWM duty cycle proportional to ADC value
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (adc_buffer[ADC_CHANNEL_0] * pwm_period) / ADC_FULL_SCALE);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (adc_buffer[ADC_CHANNEL_1] * pwm_period) / ADC_FULL_SCALE);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (adc_buffer[ADC_CHANNEL_2] * pwm_period) / ADC_FULL_SCALE);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (adc_buffer[0] * pwm_period) / ADC_FULL_SCALE);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (adc_buffer[1] * pwm_period) / ADC_FULL_SCALE);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (adc_buffer[2] * pwm_period) / ADC_FULL_SCALE);
 }
 
 void Handle_Button(void)
 {
-  bool button_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_12) == GPIO_PIN_RESET);
+  bool button_state = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_12) == GPIO_PIN_RESET);
   uint32_t current_time = HAL_GetTick();
 
-  // Button press detection
+  // Button PRESS detection
   if (button_state && !button_input.is_button_pressed)
   {
-    // button state is pressed
     button_input.is_button_pressed = true;
     button_input.press_time = current_time; 
   }
 
-  // Button release detection
+  // Button RELEASE detection
   if (!button_state && button_input.is_button_pressed)
   {
     button_input.is_button_pressed = false;
-    
-    // Initialize Button Press Duration
     uint32_t press_duration = current_time - button_input.press_time;
 
-    // Detect SHORT Press
+    // SHORT PRESS (<300ms)
     if (press_duration < PRESS_SHORT_TIME_MS)
     {
       // Check for double click
       if (current_time - button_input.last_release < PRESS_DOUBLE_TIME_MS)
       {
         button_input.click_count++;
+        
         if (button_input.click_count == 2)
         {
-          running_mode = false;
-        } else {
-          running_mode = true;
-         
-          running_led.direction = true;
-          running_led.position = 0;
-          running_led.last_update_time = current_time;
+          // DOUBLE CLICK - Toggle running mode
+          running_mode = !running_mode;
+          
+          if (running_mode)
+          {
+            running_led.position = 0;
+            running_led.direction = true;
+            running_led.last_update_time = current_time;
+          }
+          
+          button_input.click_count = 0;
         }
+      } else {
+        // SINGLE SHORT PRESS - Toggle display mode
+        if (!running_mode)
+        {
+          display_mode = !display_mode;
+        }
+        button_input.click_count = 1;
       }
+      
+      button_input.last_release = current_time;
+    }
+    // LONG PRESS (>=500ms)
+    else if (press_duration >= PRESS_LONG_TIME_MS)
+    {
+      // Change channel
+      running_mode = false;
+      current_channel = (current_channel + 1) % ADC_CHANNELS;
+      Indicate_Channel(current_channel);
       button_input.click_count = 0;
     }
- } else {
-  if (running_mode == false)
-  {
-    // Opposite value
-    display_mode = !display_mode;
   }
-  button_input.click_count = 1;
- }
-
-  button_input.last_release = current_time;
+  
+  // Reset click counter if timeout
+  if (current_time - button_input.last_release > PRESS_DOUBLE_TIME_MS && 
+      button_input.click_count == 1)
+  {
+    button_input.click_count = 0;
+  }
 }
 
 
@@ -332,9 +351,9 @@ int main(void)
   }
 
   // Start PWM on all 3 channels
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
 
   // Initial indication: show channel 0 selected
   Indicate_Channel(current_channel);
