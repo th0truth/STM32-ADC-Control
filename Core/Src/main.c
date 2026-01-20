@@ -43,7 +43,19 @@
 #define DIGITAL_INPUTS 1
 #define PWM_OUTPUTS 3
 
-#define LEDS 8
+// Define named pins
+#define LED_PB0_Pin GPIO_PIN_0
+#define LED_PB1_Pin GPIO_PIN_1
+#define LED_PB2_Pin GPIO_PIN_2
+#define LED_PB3_Pin GPIO_PIN_3
+#define LED_PB4_Pin GPIO_PIN_4
+#define LED_PB5_Pin GPIO_PIN_5
+#define LED_PB6_Pin GPIO_PIN_6
+#define LED_PB7_Pin GPIO_PIN_7
+
+#define BUTTON_Pin GPIO_PIN_13
+
+#define NUM_LEDS 8
 
 // Button thresholds (in ms)
 #define PRESS_SHORT_TIME_MS 300
@@ -102,14 +114,14 @@ RunningLED running_led = {
 
 
 // Set LED (GPIO) pins 
-GPIO_TypeDef *led_ports[LEDS] = {
-  GPIOA, GPIOA, GPIOA, GPIOA,
-  GPIOA, GPIOB, GPIOB, GPIOB
+GPIO_TypeDef *led_ports[NUM_LEDS] = {
+  LED_PB0_GPIO_Port, LED_PB1_GPIO_Port, LED_PB2_GPIO_Port, LED_PB3_GPIO_Port,
+  LED_PB4_GPIO_Port, LED_PB5_GPIO_Port, LED_PB6_GPIO_Port, LED_PB7_GPIO_Port
 };
   
-uint16_t led_pins[LEDS] = {
-  GPIO_PIN_3, GPIO_PIN_4, GPIO_PIN_5, GPIO_PIN_6,
-  GPIO_PIN_7, GPIO_PIN_0, GPIO_PIN_1, GPIO_PIN_2
+uint16_t led_pins[NUM_LEDS] = {
+  LED_PB0_Pin, LED_PB1_Pin, LED_PB2_Pin, LED_PB3_Pin,
+  LED_PB4_Pin, LED_PB5_Pin, LED_PB6_Pin, LED_PB7_Pin
 };
 
 /* USER CODE END PV */
@@ -121,7 +133,7 @@ static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
-void set_LEDs(uint8_t pattern);
+void set_NUM_LEDS(uint8_t pattern);
 void Display_Scale(uint16_t adc_buffer);
 void Display_Bits(uint16_t adc_value);
 void Indicate_Channels(uint8_t channel);
@@ -134,16 +146,16 @@ void Handle_Button(void);
 /* USER CODE BEGIN 0 */
 
 // Set LED GPIO pins 
-void set_LEDs(uint8_t pattern)
+void set_NUM_LEDS(uint8_t pattern)
 {
-  for (uint16_t i = 0; i < LEDS; i++)
+  for (uint16_t i = 0; i < NUM_LEDS; i++)
   {
     HAL_GPIO_WritePin(led_ports[i], led_pins[i],
     (pattern & (1 << i)) ?  GPIO_PIN_SET : GPIO_PIN_RESET);
   }
 }
 
-// The bar graph scale mode for 8 LEDs
+// The bar graph scale mode for 8 NUM_LEDS
 void Display_Scale(uint16_t adc_value)
 {
   // Convert ADC_value (0-4095) to the LED count (0-8)
@@ -157,25 +169,25 @@ void Display_Scale(uint16_t adc_value)
     pattern = pattern | (1 << i);    
   }
 
-  set_LEDs(pattern);
+  set_NUM_LEDS(pattern);
 }
 
 // Display upper 8 bits of ADC value in binary
 void Display_Bits(uint16_t adc_value)
 {
   uint8_t upper_bits = (adc_value >> 4) & 0xFF;
-  set_LEDs(upper_bits);
+  set_NUM_LEDS(upper_bits);
 }
 
-// Blink all LEDs to indicate channel number
+// Blink all NUM_LEDS to indicate channel number
 void Indicate_Channel(uint8_t channel)
 {
   // Blink (channel + 1) times 
   for (uint8_t i = 0; i < (channel + 1); i++)
   {
-    set_LEDs(0xFF); // All LEDs ON
+    set_NUM_LEDS(0xFF); // All NUM_LEDS ON
     HAL_Delay(200);
-    set_LEDs(0x00); // All LEDs OFF
+    set_NUM_LEDS(0x00); // All NUM_LEDS OFF
     HAL_Delay(200);
   }
 }
@@ -194,14 +206,14 @@ void Update_Running_LED(void)
     running_led.last_update_time = current_time;
 
     // Light only the current LED
-    set_LEDs(1 << running_led.position);
+    set_NUM_LEDS(1 << running_led.position);
     
     if (running_led.direction)
     {
       running_led.position++;
-      if (running_led.position >= (LEDS - 1))
+      if (running_led.position >= (NUM_LEDS - 1))
       {
-        running_led.position = LEDS - 1;
+        running_led.position = NUM_LEDS - 1;
         running_led.direction = false; // Reverse direction
       }
     } else {
@@ -228,7 +240,7 @@ void Update_PWM_Outputs(void)
 
 void Handle_Button(void)
 {
-  bool button_state = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET);
+  bool button_state = (HAL_GPIO_ReadPin(GPIOC, BUTTON_Pin) == GPIO_PIN_RESET);
   uint32_t current_time = HAL_GetTick();
 
   // Button PRESS detection
@@ -338,9 +350,9 @@ int main(void)
   {
     while (1)
     {
-      set_LEDs(0xFF); // All LEDs ON
+      set_NUM_LEDS(0xFF); // All NUM_LEDS ON
       HAL_Delay(100);
-      set_LEDs(0x00); // All LEDs OFF 
+      set_NUM_LEDS(0x00); // All NUM_LEDS OFF 
       HAL_Delay(200);
     }
   }
@@ -529,7 +541,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 83;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 999;
+  htim1.Init.Period = 4000;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -623,31 +635,28 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6
-                          |GPIO_PIN_7, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED_PB0_Pin|LED_PB1_Pin|LED_PB2_Pin|LED_PB3_Pin
+                          |LED_PB4_Pin|LED_PB5_Pin|LED_PB6_Pin|LED_PB7_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : PC13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  /*Configure GPIO pin : BUTTON_Pin */
+  GPIO_InitStruct.Pin = BUTTON_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA3 PA4 PA5 PA6
-                           PA7 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6
-                          |GPIO_PIN_7;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PB0 PB1 PB2 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2;
+  /*Configure GPIO pins : LED_PB0_Pin LED_PB1_Pin LED_PB2_Pin */
+  GPIO_InitStruct.Pin = LED_PB0_Pin|LED_PB1_Pin|LED_PB2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LED_PB3_Pin LED_PB4_Pin LED_PB5_Pin LED_PB6_Pin
+                           LED_PB7_Pin */
+  GPIO_InitStruct.Pin = LED_PB3_Pin|LED_PB4_Pin|LED_PB5_Pin|LED_PB6_Pin
+                          |LED_PB7_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
