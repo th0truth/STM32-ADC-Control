@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "stm32f4xx_hal_gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -63,6 +64,9 @@
 #define PRESS_LONG_TIME_MS 500 
 #define PRESS_DOUBLE_TIME_MS 500
 
+// Random
+#define RAND_BUFFER_SIZE 16
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -72,7 +76,9 @@ DMA_HandleTypeDef hdma_adc1;
 TIM_HandleTypeDef htim1;
 
 osThreadId defaultTaskHandle;
-osThreadId RandHandle;
+osThreadId RandNumHandle;
+osThreadId LED_PC15Handle;
+osThreadId LED_PC13Handle;
 /* USER CODE BEGIN PV */
 
 // Buffer to store ADC readings from 3 channels 
@@ -115,6 +121,11 @@ RunningLED running_led = {
   .direction = true,
 };
 
+uint32_t random_buffer[RAND_BUFFER_SIZE] = {0};
+uint8_t random_buffer_index = 0;
+
+// Mutex for thread-safe random number access
+osMutexId randomMutexHandle;
 
 // Set LED (GPIO) pins 
 GPIO_TypeDef *led_ports[NUM_LEDS] = {
@@ -136,7 +147,9 @@ static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 void StartDefaultTask(void const * argument);
-void Rand_Init(void const * argument);
+void RandNum_Task(void const * argument);
+void LED_PC15_Task(void const * argument);
+void LED_PC04_Task(void const * argument);
 
 /* USER CODE BEGIN PFP */
 void set_NUM_LEDS(uint8_t pattern);
@@ -146,6 +159,8 @@ void Indicate_Channels(uint8_t channel);
 void Update_Running_LED(void);
 void Update_PWM_Outputs(void);
 void Handle_Button(void);
+uint32_t ADC_Random_Byte(void);
+uint32_t ADC_Random_Word(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -314,6 +329,36 @@ void Handle_Button(void)
   }
 }
 
+// Uses least significant bits which contain thermal noise   
+uint32_t ADC_Random_Byte(void)
+{
+  uint8_t random = 0;
+
+  // Collect Least Significnt Bits multiple ADC samples
+  for (int i = 0; i < 8; i++)
+  {
+    uint32_t bit = adc_buffer[i % ADC_CHANNELS] & 0x01;
+    random = (random << 1) | bit;
+
+    for (volatile int j = 0; j < 100; j++);
+  }
+
+  return random;
+}
+
+// Get 32-bit random from ADC
+uint32_t ADC_Random_Word(void)
+{
+  uint32_t random = 0;
+
+  random |= ((uint32_t)ADC_Random_Byte()) << 13;
+  random |= ((uint32_t)ADC_Random_Byte() << 17);
+  random |= ((uint32_t)ADC_Random_Byte() << 5);
+  random |= ((uint32_t)ADC_Random_Byte());
+  
+  return random;
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -376,7 +421,8 @@ int main(void)
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+    // Create mutex for random number access
+  
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -396,9 +442,17 @@ int main(void)
   osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
-  /* definition and creation of Rand */
-  osThreadDef(Rand, Rand_Init, osPriorityAboveNormal, 0, 128);
-  RandHandle = osThreadCreate(osThread(Rand), NULL);
+  /* definition and creation of RandNum */
+  osThreadDef(RandNum, RandNum_Task, osPriorityAboveNormal, 0, 128);
+  RandNumHandle = osThreadCreate(osThread(RandNum), NULL);
+
+  /* definition and creation of LED_PC15 */
+  osThreadDef(LED_PC15, LED_PC15_Task, osPriorityNormal, 0, 128);
+  LED_PC15Handle = osThreadCreate(osThread(LED_PC15), NULL);
+
+  /* definition and creation of LED_PC13 */
+  osThreadDef(LED_PC13, LED_PC04_Task, osPriorityNormal, 0, 128);
+  LED_PC13Handle = osThreadCreate(osThread(LED_PC13), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -674,6 +728,9 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LED_PB0_Pin|LED_PB1_Pin|LED_PB2_Pin|LED_PB3_Pin
                           |LED_PB4_Pin|LED_PB5_Pin|LED_PB6_Pin|LED_PB7_Pin, GPIO_PIN_RESET);
 
@@ -682,6 +739,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PC14 PC15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LED_PB0_Pin LED_PB1_Pin LED_PB2_Pin */
   GPIO_InitStruct.Pin = LED_PB0_Pin|LED_PB1_Pin|LED_PB2_Pin;
@@ -726,22 +790,68 @@ void StartDefaultTask(void const * argument)
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_Rand_Init */
+/* USER CODE BEGIN Header_RandNum_Task */
 /**
-* @brief Function implementing the Rand thread.
+* @brief Function implementing the RandNum thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_Rand_Init */
-void Rand_Init(void const * argument)
+/* USER CODE END Header_RandNum_Task */
+void RandNum_Task(void const * argument)
 {
-  /* USER CODE BEGIN Rand_Init */
+  /* USER CODE BEGIN RandNum_Task */
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    if (osMutexWait(randomMutexHandle, 100) == osOK)
+    {
+      for (uint32_t i = 0; i < RAND_BUFFER_SIZE; i++)
+      {
+        random_buffer[i] = ADC_Random_Word();
+      }
+      osMutexRelease(randomMutexHandle);
+    }
+    osDelay(500);
   }
-  /* USER CODE END Rand_Init */
+  /* USER CODE END RandNum_Task */
+}
+
+/* USER CODE BEGIN Header_LED_PC15_Task */
+/**
+* @brief Function implementing the LED_PC15 thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_LED_PC15_Task */
+void LED_PC15_Task(void const * argument)
+{
+  /* USER CODE BEGIN LED_PC15_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_14);
+    osDelay(500);
+  }
+  /* USER CODE END LED_PC15_Task */
+}
+
+/* USER CODE BEGIN Header_LED_PC04_Task */
+/**
+* @brief Function implementing the LED_PC13 thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_LED_PC04_Task */
+void LED_PC04_Task(void const * argument)
+{
+  /* USER CODE BEGIN LED_PC04_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+    osDelay(500);
+  }
+  /* USER CODE END LED_PC04_Task */
 }
 
 /**
