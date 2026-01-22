@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-#include "stm32f4xx_hal_gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -45,15 +44,7 @@
 #define DIGITAL_INPUTS 1
 #define PWM_OUTPUTS 3
 
-// Define named pins
-#define LED_PB0_Pin GPIO_PIN_0
-#define LED_PB1_Pin GPIO_PIN_1
-#define LED_PB2_Pin GPIO_PIN_2
-#define LED_PB3_Pin GPIO_PIN_3
-#define LED_PB4_Pin GPIO_PIN_4
-#define LED_PB5_Pin GPIO_PIN_5
-#define LED_PB6_Pin GPIO_PIN_6
-#define LED_PB7_Pin GPIO_PIN_7
+
 
 #define BUTTON_Pin GPIO_PIN_13
 
@@ -75,8 +66,8 @@ DMA_HandleTypeDef hdma_adc1;
 
 TIM_HandleTypeDef htim1;
 
+osThreadId Handle_ButtonHandle;
 osThreadId defaultTaskHandle;
-osThreadId RandNumHandle;
 osThreadId LED_PC15Handle;
 osThreadId LED_PC13Handle;
 /* USER CODE BEGIN PV */
@@ -88,7 +79,7 @@ uint16_t adc_buffer[ADC_CHANNELS];
 uint8_t current_channel = 0;
 
 // There're two options (0 - bar graph | 1 - binary)
-uint8_t display_mode = 0;
+uint8_t display_mode = 1;
 
 // Running light animation (0 - normal display | 1 - one LED moves back and forth)
 bool running_mode = false;
@@ -146,8 +137,8 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
-void StartDefaultTask(void const * argument);
-void RandNum_Task(void const * argument);
+void Handle_Button_Task(void const * argument);
+void default_Task(void const * argument);
 void LED_PC15_Task(void const * argument);
 void LED_PC04_Task(void const * argument);
 
@@ -158,7 +149,6 @@ void Display_Bits(uint16_t adc_value);
 void Indicate_Channels(uint8_t channel);
 void Update_Running_LED(void);
 void Update_PWM_Outputs(void);
-void Handle_Button(void);
 uint32_t ADC_Random_Byte(void);
 uint32_t ADC_Random_Word(void);
 /* USER CODE END PFP */
@@ -259,76 +249,6 @@ void Update_PWM_Outputs(void)
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (adc_buffer[2] * pwm_period) / ADC_FULL_SCALE);
 }
 
-void Handle_Button(void)
-{
-  bool button_state = (HAL_GPIO_ReadPin(GPIOC, BUTTON_Pin) == GPIO_PIN_RESET);
-  uint32_t current_time = HAL_GetTick();
-
-  // Button PRESS detection
-  if (button_state && !button_input.is_button_pressed)
-  {
-    button_input.is_button_pressed = true;
-    button_input.press_time = current_time; 
-  }
-
-  // Button RELEASE detection
-  if (!button_state && button_input.is_button_pressed)
-  {
-    button_input.is_button_pressed = false;
-    uint32_t press_duration = current_time - button_input.press_time;
-
-    // SHORT PRESS (<300ms)
-    if (press_duration < PRESS_SHORT_TIME_MS)
-    {
-      // Check for double click
-      if (current_time - button_input.last_release < PRESS_DOUBLE_TIME_MS)
-      {
-        button_input.click_count++;
-        
-        if (button_input.click_count == 2)
-        {
-          // DOUBLE CLICK - Toggle running mode
-          running_mode = !running_mode;
-          
-          if (running_mode)
-          {
-            running_led.position = 0;
-            running_led.direction = true;
-            running_led.last_update_time = current_time;
-          }
-          
-          button_input.click_count = 0;
-        }
-      } else {
-        // SINGLE SHORT PRESS - Toggle display mode
-        if (!running_mode)
-        {
-          display_mode = !display_mode;
-        }
-        button_input.click_count = 1;
-      }
-      
-      button_input.last_release = current_time;
-    }
-    // LONG PRESS (>=500ms)
-    else if (press_duration >= PRESS_LONG_TIME_MS)
-    {
-      // Change channel
-      running_mode = false;
-      current_channel = (current_channel + 1) % ADC_CHANNELS;
-      Indicate_Channel(current_channel);
-      button_input.click_count = 0;
-    }
-  }
-  
-  // Reset click counter if timeout
-  if (current_time - button_input.last_release > PRESS_DOUBLE_TIME_MS && 
-      button_input.click_count == 1)
-  {
-    button_input.click_count = 0;
-  }
-}
-
 // Uses least significant bits which contain thermal noise   
 uint32_t ADC_Random_Byte(void)
 {
@@ -414,10 +334,6 @@ int main(void)
 
   // Initial indication: show channel 0 selected
   Indicate_Channel(current_channel);
-  
-  // Small delay before entering main loop
-  HAL_Delay(500);
-
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -438,13 +354,13 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128);
-  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+  /* definition and creation of Handle_Button */
+  osThreadDef(Handle_Button, Handle_Button_Task, osPriorityAboveNormal, 0, 128);
+  Handle_ButtonHandle = osThreadCreate(osThread(Handle_Button), NULL);
 
-  /* definition and creation of RandNum */
-  osThreadDef(RandNum, RandNum_Task, osPriorityAboveNormal, 0, 128);
-  RandNumHandle = osThreadCreate(osThread(RandNum), NULL);
+  /* definition and creation of defaultTask */
+  osThreadDef(defaultTask, default_Task, osPriorityAboveNormal, 0, 128);
+  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of LED_PC15 */
   osThreadDef(LED_PC15, LED_PC15_Task, osPriorityNormal, 0, 128);
@@ -465,29 +381,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
 
-    // Handling button input
-    Handle_Button();
-
-    Update_PWM_Outputs();
-
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, sizeof(adc_buffer) / sizeof(adc_buffer[0]));
-
-    if (running_mode == true)
-    {
-      Update_Running_LED();
-    } else {
-      uint16_t current_adc = adc_buffer[current_channel];
-      
-      if (display_mode == 0)
-      {
-        Display_Scale(current_adc);
-      } else {
-        Display_Bits(current_adc);
-      }
-    }
 
     // Set small delay for button debouncing to prevent CPU overflow
     HAL_Delay(10);
@@ -495,7 +389,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+
   /* USER CODE END 3 */
 }
 
@@ -580,7 +474,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Channel = ADC_CHANNEL_6;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -590,7 +484,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -599,7 +493,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Channel = ADC_CHANNEL_4;
   sConfig.Rank = 3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -728,40 +622,53 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, LED_PB0_Pin|LED_PB1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED_PB0_Pin|LED_PB1_Pin|LED_PB2_Pin|LED_PB3_Pin
-                          |LED_PB4_Pin|LED_PB5_Pin|LED_PB6_Pin|LED_PB7_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LED_PB2_Pin|LED_PB3_Pin|LED_PB5_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : BUTTON_Pin */
-  GPIO_InitStruct.Pin = BUTTON_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, LED_PB6_Pin|LED_PB7_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PC14 PC15 */
-  GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15;
+  /*Configure GPIO pins : LED_PB0_Pin LED_PB1_Pin */
+  GPIO_InitStruct.Pin = LED_PB0_Pin|LED_PB1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_PB0_Pin LED_PB1_Pin LED_PB2_Pin */
-  GPIO_InitStruct.Pin = LED_PB0_Pin|LED_PB1_Pin|LED_PB2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  /*Configure GPIO pin : PA0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_PB3_Pin LED_PB4_Pin LED_PB5_Pin LED_PB6_Pin
-                           LED_PB7_Pin */
-  GPIO_InitStruct.Pin = LED_PB3_Pin|LED_PB4_Pin|LED_PB5_Pin|LED_PB6_Pin
-                          |LED_PB7_Pin;
+  /*Configure GPIO pins : LED_PB2_Pin LED_PB3_Pin LED_PB5_Pin */
+  GPIO_InitStruct.Pin = LED_PB2_Pin|LED_PB3_Pin|LED_PB5_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LED_PB4_Pin */
+  GPIO_InitStruct.Pin = LED_PB4_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(LED_PB4_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LED_PB6_Pin */
+  GPIO_InitStruct.Pin = LED_PB6_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_PB6_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LED_PB7_Pin */
+  GPIO_InitStruct.Pin = LED_PB7_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_PB7_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -772,48 +679,127 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartDefaultTask */
+/* USER CODE BEGIN Header_Handle_Button_Task */
 /**
-  * @brief  Function implementing the defaultTask thread.
+  * @brief  Function implementing the Handle_Button thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void const * argument)
+/* USER CODE END Header_Handle_Button_Task */
+void Handle_Button_Task(void const * argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
+  
   for(;;)
   {
+    bool button_state = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET);
+    uint32_t current_time = HAL_GetTick();
+
+    // Button PRESS detection
+    if (button_state && !button_input.is_button_pressed)
+    {
+      button_input.is_button_pressed = true;
+      button_input.press_time = current_time; 
+    }
+
+    // Button RELEASE detection
+    if (!button_state && button_input.is_button_pressed)
+    {
+      button_input.is_button_pressed = false;
+      uint32_t press_duration = current_time - button_input.press_time;
+
+      // SHORT PRESS (<300ms)
+      if (press_duration < PRESS_SHORT_TIME_MS)
+      {
+        // Check for double click
+        if (current_time - button_input.last_release < PRESS_DOUBLE_TIME_MS)
+        {
+          button_input.click_count++;
+          
+          if (button_input.click_count == 2)
+          {
+            // DOUBLE CLICK - Toggle running mode
+            running_mode = !running_mode;
+            
+            if (running_mode)
+            {
+              running_led.position = 0;
+              running_led.direction = true;
+              running_led.last_update_time = current_time;
+            }
+            
+            button_input.click_count = 0;
+          }
+        } else {
+          // SINGLE SHORT PRESS - Toggle display mode
+          if (!running_mode)
+          {
+            display_mode = !display_mode;
+          }
+          button_input.click_count = 1;
+        }
+        
+        button_input.last_release = current_time;
+      }
+      // LONG PRESS (>=500ms)
+      else if (press_duration >= PRESS_LONG_TIME_MS)
+      {
+        // Change channel
+        running_mode = false;
+        current_channel = (current_channel + 1) % ADC_CHANNELS;
+        Indicate_Channel(current_channel);
+        button_input.click_count = 0;
+      }
+    }
+    
+    // Reset click counter if timeout
+    if (current_time - button_input.last_release > PRESS_DOUBLE_TIME_MS && 
+        button_input.click_count == 1)
+    {
+      button_input.click_count = 0;
+    }
+
+   
     osDelay(1);
   }
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_RandNum_Task */
+/* USER CODE BEGIN Header_default_Task */
 /**
-* @brief Function implementing the RandNum thread.
+* @brief Function implementing the defaultTask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_RandNum_Task */
-void RandNum_Task(void const * argument)
+/* USER CODE END Header_default_Task */
+void default_Task(void const * argument)
 {
-  /* USER CODE BEGIN RandNum_Task */
+  /* USER CODE BEGIN default_Task */
   /* Infinite loop */
   for(;;)
   {
-    if (osMutexWait(randomMutexHandle, 100) == osOK)
+    Update_PWM_Outputs();
+
+    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, sizeof(adc_buffer) / sizeof(adc_buffer[0]));
+
+    if (running_mode == true)
     {
-      for (uint32_t i = 0; i < RAND_BUFFER_SIZE; i++)
+      Update_Running_LED();
+    } else {
+      uint16_t current_adc = adc_buffer[current_channel];
+      
+      if (display_mode == 0)
       {
-        random_buffer[i] = ADC_Random_Word();
+        Display_Scale(current_adc);
+      } else {
+        Display_Bits(current_adc);
       }
-      osMutexRelease(randomMutexHandle);
     }
-    osDelay(500);
+
+    osDelay(1);
   }
-  /* USER CODE END RandNum_Task */
+  /* USER CODE END default_Task */
 }
 
 /* USER CODE BEGIN Header_LED_PC15_Task */
@@ -848,7 +834,7 @@ void LED_PC04_Task(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+    // HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
     osDelay(500);
   }
   /* USER CODE END LED_PC04_Task */
